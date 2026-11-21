@@ -7,6 +7,7 @@ from typing import (
     Callable,
     Dict,
     Generator,
+    Iterable,
     List,
     Optional,
     Pattern,
@@ -33,6 +34,14 @@ from pdfminer.psparser import PSLiteral
 from . import utils
 from ._typing import T_bbox, T_num, T_obj, T_obj_list
 from .container import Container
+from .redaction import (
+    DEFAULT_PLACEHOLDER,
+    PageRedactionReport,
+    RedactedCell,
+    RedactedExtraction,
+    Redactor,
+    build_page_report,
+)
 from .structure import PDFStructTree, StructTreeMissing
 from .table import T_table_settings, Table, TableFinder, TableSettings
 from .utils import decode_text, resolve_all, resolve_and_decode
@@ -528,6 +537,200 @@ class Page(Container):
 
     def extract_text(self, **kwargs: Any) -> str:
         return self.get_textmap(**tuplify_list_kwargs(kwargs)).as_string
+
+    def extract_text_redacted(
+        self,
+        redactions: Iterable[Any],
+        placeholder: str = DEFAULT_PLACEHOLDER,
+        include_partial: bool = True,
+        **kwargs: Any,
+    ) -> str:
+        """
+        Extract the page's text with redaction applied.
+
+        ``redactions`` is a collection of rectangles in this page's
+        top-left-origin coordinate system (``x0``, ``top``, ``x1``,
+        ``bottom``), or dicts with those keys (or ``x0``/``y0``/``x1``/
+        ``y1`` in PDF-native coordinates). The rectangles may overlap; all
+        coverage is computed against their union.
+
+        Any glyph that overlaps the union over a positive area is withheld
+        from the output. Consecutive withheld glyphs collapse into a single
+        ``placeholder`` placed at the run's original bounds. All remaining
+        ``**kwargs`` behave as in :meth:`extract_text`.
+
+        This method never mutates the page or the underlying PDF; the
+        ordinary :meth:`extract_text` is unaffected.
+        """
+        redactor = self._make_redactor(
+            redactions, placeholder=placeholder, include_partial=include_partial
+        )
+        return redactor.extract_text(self.chars, **kwargs)
+
+    def redacted_chars(
+        self,
+        redactions: Iterable[Any],
+        placeholder: str = DEFAULT_PLACEHOLDER,
+        include_partial: bool = True,
+        x_tolerance: T_num = utils.text.DEFAULT_X_TOLERANCE,
+        y_tolerance: T_num = utils.text.DEFAULT_Y_TOLERANCE,
+    ) -> T_obj_list:
+        """
+        Return char objects with occluded glyphs replaced by placeholders.
+
+        Surviving glyphs are returned unchanged; each maximal run of
+        consecutive occluded glyphs becomes one placeholder whose bbox spans
+        the run's original extent. The occluded glyphs' text is discarded.
+        """
+        redactor = self._make_redactor(
+            redactions, placeholder=placeholder, include_partial=include_partial
+        )
+        return redactor.redacted_chars(
+            self.chars, x_tolerance=x_tolerance, y_tolerance=y_tolerance
+        )
+
+    def _make_redactor(
+        self,
+        redactions: Iterable[Any],
+        placeholder: str = DEFAULT_PLACEHOLDER,
+        include_partial: bool = True,
+    ) -> Redactor:
+        return Redactor(
+            redactions,
+            page_bbox=self.bbox,
+            page_height=self.root_page.height,
+            placeholder=placeholder,
+            include_partial=include_partial,
+        )
+
+    def extract_tables_redacted(
+        self,
+        redactions: Iterable[Any],
+        table_settings: Optional[T_table_settings] = None,
+        placeholder: str = DEFAULT_PLACEHOLDER,
+        include_partial: bool = True,
+    ) -> List[List[List[Optional[str]]]]:
+        """
+        Extract all tables on the page with redaction applied.
+
+        The table grid is preserved: the returned structure is
+        ``table -> row -> cell``, exactly as in :meth:`extract_tables`.
+        Cells containing occluded glyphs have those glyphs replaced by
+        ``placeholder`` and are returned as :class:`pdfplumber.redaction.RedactedCell`
+        instances (still ``str`` subclasses), which carry a ``redaction``
+        attribute with the cell's position and counts.
+
+        A cell that contained occluded glyphs is therefore never a plain
+        empty string, so it cannot be mistaken for a cell that was empty in
+        the source document.
+        """
+        redactor = self._make_redactor(
+            redactions, placeholder=placeholder, include_partial=include_partial
+        )
+        return self._extract_tables_redacted(redactor, table_settings)
+
+    def extract_table_redacted(
+        self,
+        redactions: Iterable[Any],
+        table_settings: Optional[T_table_settings] = None,
+        placeholder: str = DEFAULT_PLACEHOLDER,
+        include_partial: bool = True,
+    ) -> Optional[List[List[Optional[str]]]]:
+        """
+        Like :meth:`extract_tables_redacted`, but returns only the largest
+        table (see :meth:`find_table`).
+        """
+        redactor = self._make_redactor(
+            redactions, placeholder=placeholder, include_partial=include_partial
+        )
+        tset = TableSettings.resolve(table_settings)
+        table = self.find_table(tset)
+        if table is None:
+            return None
+
+        return table.extract_redacted(
+            redactor,
+            cell_factory=RedactedCell,
+            **(tset.text_settings or {}),
+        )
+
+    def _extract_tables_redacted(
+        self,
+        redactor: Redactor,
+        table_settings: Optional[T_table_settings] = None,
+    ) -> List[List[List[Optional[str]]]]:
+        tset = TableSettings.resolve(table_settings)
+        tables = self.find_tables(tset)
+        return [
+            table.extract_redacted(
+                redactor,
+                cell_factory=RedactedCell,
+                **(tset.text_settings or {}),
+            )
+            for table in tables
+        ]
+
+    def redaction_report(
+        self,
+        redactions: Iterable[Any],
+        table_settings: Optional[T_table_settings] = None,
+        placeholder: str = DEFAULT_PLACEHOLDER,
+        include_partial: bool = True,
+    ) -> PageRedactionReport:
+        """
+        Return a report of what the redactions cover on this page.
+
+        The report contains only the page number, redaction positions, and
+        glyph/cell counts; it never contains any source text. Table cells
+        containing occluded glyphs are listed by position and counts.
+        """
+        redactor = self._make_redactor(
+            redactions, placeholder=placeholder, include_partial=include_partial
+        )
+        tset = TableSettings.resolve(table_settings)
+        tables = self.find_tables(tset) if tset is not None else []
+        report, _ = build_page_report(
+            redactor,
+            page_number=self.page_number,
+            chars=self.chars,
+            tables=tables,
+            text_settings=tset.text_settings if tset is not None else None,
+        )
+        return report
+
+    def extract_redacted(
+        self,
+        redactions: Iterable[Any],
+        table_settings: Optional[T_table_settings] = None,
+        placeholder: str = DEFAULT_PLACEHOLDER,
+        include_partial: bool = True,
+        **text_kwargs: Any,
+    ) -> RedactedExtraction:
+        """
+        Extract shareable text and tables, plus a text-free report, in one
+        pass.
+
+        Returns a :class:`pdfplumber.redaction.RedactedExtraction` with
+        ``.text`` (a string), ``.tables`` (``table -> row -> cell``), and
+        ``.report`` (positions and counts only).
+        """
+        redactor = self._make_redactor(
+            redactions, placeholder=placeholder, include_partial=include_partial
+        )
+        tset = TableSettings.resolve(table_settings)
+        tables = self.find_tables(tset)
+        report, cell_matrices = build_page_report(
+            redactor,
+            page_number=self.page_number,
+            chars=self.chars,
+            tables=tables,
+            text_settings=tset.text_settings,
+        )
+        return RedactedExtraction(
+            text=redactor.extract_text(self.chars, **text_kwargs),
+            tables=[cell_matrices[i] for i in range(len(tables))],
+            report=report,
+        )
 
     def extract_text_simple(self, **kwargs: Any) -> str:
         return utils.extract_text_simple(self.chars, **kwargs)

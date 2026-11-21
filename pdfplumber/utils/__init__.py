@@ -7,7 +7,9 @@ from .geometry import (  # noqa: F401
     crop_to_bbox,
     curve_to_edges,
     filter_edges,
+    get_bbox_intersection_area,
     get_bbox_overlap,
+    get_union_intersection_area,
     intersects_bbox,
     line_to_edge,
     merge_bboxes,
@@ -18,8 +20,10 @@ from .geometry import (  # noqa: F401
     objects_to_rect,
     outside_bbox,
     rect_to_edges,
+    rects_to_union,
     resize_object,
     snap_objects,
+    union_area,
     within_bbox,
 )
 from .pdfinternals import (  # noqa: F401

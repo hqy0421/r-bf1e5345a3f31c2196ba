@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file. The format is based on [Keep a Changelog](http://keepachangelog.com/).
 
+## [Unreleased]
+
+### Added
+- Add redaction-aware extraction: `Page.extract_text_redacted`, `Page.redacted_chars`, `Page.extract_tables_redacted`, `Page.extract_table_redacted`, `Page.redaction_report`, `Page.extract_redacted`, and `PDF.redaction_report`. Occlusion is measured against the *union* of the supplied rectangles (overlaps are never double-counted); a glyph is withheld if its bounding box shares any positive area with that union; consecutive withheld glyphs collapse to a single placeholder that preserves the run's boundaries. Table grids are preserved, and cells containing occluded glyphs are returned as `RedactedCell` objects that can never be mistaken for originally-empty cells. Reports contain only page numbers, positions, and counts. The existing extraction APIs are unchanged.
+
 ## [0.11.10] — 2026-06-14
 
 ### Changed

@@ -3,7 +3,19 @@ import logging
 import pathlib
 from io import BufferedReader, BytesIO
 from types import TracebackType
-from typing import Any, Dict, Generator, List, Literal, Optional, Tuple, Type, Union
+from typing import (
+    Any,
+    Dict,
+    Generator,
+    Iterable,
+    List,
+    Literal,
+    Mapping,
+    Optional,
+    Tuple,
+    Type,
+    Union,
+)
 
 from pdfminer.layout import LAParams
 from pdfminer.pdfdocument import PDFDocument
@@ -14,6 +26,7 @@ from pdfminer.pdfparser import PDFParser
 from ._typing import T_num, T_obj_list
 from .container import Container
 from .page import Page
+from .redaction import T_rect_like
 from .repair import T_repair_setting, _repair
 from .structure import PDFStructTree, StructTreeMissing
 from .utils import resolve_and_decode
@@ -203,3 +216,25 @@ class PDF(Container):
             "metadata": self.metadata,
             "pages": [page.to_dict(object_types) for page in self.pages],
         }
+
+    def redaction_report(
+        self,
+        redactions_by_page: Mapping[int, Iterable[T_rect_like]],
+        table_settings: Optional[Any] = None,
+        include_partial: bool = True,
+    ) -> Any:
+        """
+        Build a multi-page redaction report from a mapping of
+        ``{page_number: redaction_rectangles}``.
+
+        The report contains only page numbers, positions, and counts; it
+        never contains source text.
+        """
+        from .redaction import build_redaction_report
+
+        return build_redaction_report(
+            self.pages,
+            redactions_by_page,
+            include_partial=include_partial,
+            table_settings=table_settings,
+        )

@@ -374,6 +374,25 @@ class Column(CellGroup):
     pass
 
 
+def _make_cell_redaction(
+    table: "Table",
+    bbox: T_bbox,
+    row_index: int,
+    column_index: int,
+    counts: Any,
+) -> Any:
+    """Build a position-and-count record for a redacted cell."""
+    from .redaction import TableCellRedaction
+
+    return TableCellRedaction(
+        page_number=table.page.page_number,
+        row_index=row_index,
+        column_index=column_index,
+        bbox=bbox,
+        counts=counts,
+    )
+
+
 class Table(object):
     def __init__(self, page: "Page", cells: List[T_bbox]):
         self.page = page
@@ -418,10 +437,15 @@ class Table(object):
     def columns(self) -> List[CellGroup]:
         return self._get_rows_or_cols(Column)
 
-    def extract(self, **kwargs: Any) -> List[List[Optional[str]]]:
+    def _extract_cells(
+        self,
+        chars: T_obj_list,
+        redactor: Optional[Any] = None,
+        cell_factory: Optional[Any] = None,
+        **kwargs: Any,
+    ) -> List[List[Any]]:
 
-        chars = self.page.chars
-        table_arr = []
+        table_arr: List[List[Any]] = []
 
         def char_in_bbox(char: T_obj, bbox: T_bbox) -> bool:
             v_mid = (char["top"] + char["bottom"]) / 2
@@ -432,29 +456,78 @@ class Table(object):
             )
 
         for row in self.rows:
-            arr = []
+            arr: List[Any] = []
             row_chars = [char for char in chars if char_in_bbox(char, row.bbox)]
 
             for cell in row.cells:
                 if cell is None:
-                    cell_text = None
-                else:
-                    cell_chars = [
-                        char for char in row_chars if char_in_bbox(char, cell)
-                    ]
+                    arr.append(None)
+                    continue
 
-                    if len(cell_chars):
-                        if "layout" in kwargs:
+                cell_chars = [char for char in row_chars if char_in_bbox(char, cell)]
+
+                if redactor is not None:
+                    counts = redactor.counts(cell_chars)
+                    if counts.redacted:
+                        if cell_chars and "layout" in kwargs:
                             kwargs["layout_width"] = cell[2] - cell[0]
                             kwargs["layout_height"] = cell[3] - cell[1]
                             kwargs["layout_bbox"] = cell
-                        cell_text = utils.extract_text(cell_chars, **kwargs)
-                    else:
-                        cell_text = ""
+                        cell_text: Any = (
+                            redactor.extract_text(cell_chars, **kwargs)
+                            if cell_chars
+                            else ""
+                        )
+                        if cell_factory is not None:
+                            cell_text = cell_factory(
+                                cell_text,
+                                redaction=_make_cell_redaction(
+                                    self, cell, len(table_arr), len(arr), counts
+                                ),
+                            )
+                        arr.append(cell_text)
+                        continue
+
+                if len(cell_chars):
+                    if "layout" in kwargs:
+                        kwargs["layout_width"] = cell[2] - cell[0]
+                        kwargs["layout_height"] = cell[3] - cell[1]
+                        kwargs["layout_bbox"] = cell
+                    cell_text = utils.extract_text(cell_chars, **kwargs)
+                else:
+                    cell_text = ""
+
                 arr.append(cell_text)
             table_arr.append(arr)
 
         return table_arr
+
+    def extract(self, **kwargs: Any) -> List[List[Optional[str]]]:
+        return self._extract_cells(self.page.chars, **kwargs)
+
+    def extract_redacted(
+        self,
+        redactor: Any,
+        source_chars: Optional[T_obj_list] = None,
+        cell_factory: Optional[Any] = None,
+        **kwargs: Any,
+    ) -> List[List[Any]]:
+        """
+        Extract this table's cells with redaction applied.
+
+        The grid (row/column layout) is identical to :meth:`extract`; cells
+        whose text contains occluded glyphs have those glyphs replaced by
+        placeholders, and are marked with a ``redaction`` attribute (when a
+        ``cell_factory`` is supplied) so that they cannot be mistaken for
+        cells that were originally empty.
+
+        ``source_chars`` should be the unredacted char list to test against
+        the redactor; it defaults to this table's page chars.
+        """
+        chars = self.page.chars if source_chars is None else source_chars
+        return self._extract_cells(
+            chars, redactor=redactor, cell_factory=cell_factory, **kwargs
+        )
 
 
 TABLE_STRATEGIES = ["lines", "lines_strict", "text", "explicit"]

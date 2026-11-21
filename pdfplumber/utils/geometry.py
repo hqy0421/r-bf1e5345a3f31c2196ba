@@ -1,6 +1,6 @@
 import itertools
 from operator import itemgetter
-from typing import Dict, Iterable, Optional
+from typing import Dict, Iterable, List, Optional, Tuple
 
 from .._typing import T_bbox, T_num, T_obj, T_obj_list
 from .clustering import cluster_objects
@@ -71,6 +71,85 @@ def calculate_area(bbox: T_bbox) -> T_num:
     if left > right or top > bottom:
         raise ValueError(f"{bbox} has a negative width or height.")
     return (right - left) * (bottom - top)
+
+
+def get_bbox_intersection_area(a: T_bbox, b: T_bbox) -> T_num:
+    """
+    Return the area of the intersection between two bboxes, or 0 if they
+    do not overlap over a positive area.
+    """
+    o_width = min(a[2], b[2]) - max(a[0], b[0])
+    o_height = min(a[3], b[3]) - max(a[1], b[1])
+    if o_width <= 0 or o_height <= 0:
+        return 0
+    return o_width * o_height
+
+
+def rects_to_union(rects: Iterable[T_bbox]) -> List[T_bbox]:
+    """
+    Given a collection of possibly-overlapping bboxes, return a set of
+    pairwise-disjoint bboxes whose union is exactly the union of the
+    original bboxes.
+
+    Uses coordinate compression, so the total area of the returned
+    rectangles counts every unit of covered space exactly once.
+    """
+    cleaned = [r for r in rects if calculate_area(r) > 0]
+    if not cleaned:
+        return []
+
+    xs = sorted({r[0] for r in cleaned} | {r[2] for r in cleaned})
+    ys = sorted({r[1] for r in cleaned} | {r[3] for r in cleaned})
+
+    # For each horizontal band, collect the covered x-intervals.
+    bands: List[Tuple[T_num, T_num, List[Tuple[T_num, T_num]]]] = []
+    for j in range(len(ys) - 1):
+        y0, y1 = ys[j], ys[j + 1]
+        if y1 <= y0:
+            continue
+        mid_y = (y0 + y1) / 2
+        runs: List[Tuple[T_num, T_num]] = []
+        for i in range(len(xs) - 1):
+            x0, x1 = xs[i], xs[i + 1]
+            if x1 <= x0:
+                continue
+            mid_x = (x0 + x1) / 2
+            covered = any(
+                (r[0] < mid_x < r[2]) and (r[1] < mid_y < r[3]) for r in cleaned
+            )
+            if not covered:
+                continue
+            if runs and runs[-1][1] == x0:
+                runs[-1] = (runs[-1][0], x1)
+            else:
+                runs.append((x0, x1))
+        if runs:
+            bands.append((y0, y1, runs))
+
+    # Coalesce vertically adjacent bands with identical x-intervals.
+    merged: List[Tuple[T_num, T_num, List[Tuple[T_num, T_num]]]] = []
+    for y0, y1, runs in bands:
+        if merged and merged[-1][1] == y0 and merged[-1][2] == runs:
+            last_y0, _, last_runs = merged[-1]
+            merged[-1] = (last_y0, y1, last_runs)
+        else:
+            merged.append((y0, y1, runs))
+
+    out: List[T_bbox] = []
+    for y0, y1, runs in merged:
+        for x0, x1 in runs:
+            out.append((x0, y0, x1, y1))
+    return out
+
+
+def union_area(rects: Iterable[T_bbox]) -> T_num:
+    """Total area covered by a collection of bboxes, counting overlaps once."""
+    return sum(calculate_area(r) for r in rects_to_union(rects))
+
+
+def get_union_intersection_area(bbox: T_bbox, union_rects: Iterable[T_bbox]) -> T_num:
+    """Area shared by ``bbox`` and a set of pairwise-disjoint bboxes."""
+    return sum(get_bbox_intersection_area(bbox, r) for r in union_rects)
 
 
 def clip_obj(obj: T_obj, bbox: T_bbox) -> Optional[T_obj]:

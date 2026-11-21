@@ -353,6 +353,40 @@ Note: The methods above are built on Pillow's [`ImageDraw` methods](http://pillo
 |`.search(pattern, regex=True, case=True, main_group=0, return_groups=True, return_chars=True, layout=False, **kwargs)`|*Experimental feature* that allows you to search a page's text, returning a list of all instances that match the query. For each instance, the response dictionary object contains the matching text, any regex group matches, the bounding box coordinates, and the char objects themselves. `pattern` can be a compiled regular expression, an uncompiled regular expression, or a non-regex string. If `regex` is `False`, the pattern is treated as a non-regex string. If `case` is `False`, the search is performed in a case-insensitive manner. Setting `main_group` restricts the results to a specific regex group within the `pattern` (default of `0` means the entire match). Setting `return_groups` and/or `return_chars` to `False` will exclude the lists of the matched regex groups and/or characters from being added (as `"groups"` and `"chars"` to the return dicts). The `layout` parameter operates as it does for `.extract_text(...)`. The remaining `**kwargs` are those you would pass to `.extract_text(layout=True, ...)`. __Note__: Zero-width and all-whitespace matches are discarded, because they (generally) have no explicit position on the page. |
 |`.dedupe_chars(tolerance=1, extra_attrs=("fontname", "size"))`| Returns a version of the page with duplicate chars — those sharing the same text, positioning (within `tolerance` x/y), and `extra_attrs` as other characters — removed. (See [Issue #71](https://github.com/jsvine/pdfplumber/issues/71) to understand the motivation.)|
 
+## Extracting text and tables with redactions
+
+If an external review process has confirmed a set of rectangles that must be hidden, `pdfplumber` can extract *shareable* text and tables that omit everything those rectangles cover. These methods are opt-in: the ordinary `extract_text`, `extract_tables`, and `objects` APIs are unchanged, and nothing is written back to the PDF.
+
+Redaction rectangles use the page's usual top-left-origin coordinates — `(x0, top, x1, bottom)` — or dicts with those keys (or `x0`/`y0`/`x1`/`y1` in PDF-native bottom-left coordinates). Rectangles may overlap; all coverage is computed against their **union**, so overlapping rectangles never double-count an area.
+
+Two occlusion states are tracked per glyph:
+
+- **fully occluded**: the glyph's whole bounding box lies within the redaction union.
+- **partially occluded**: the glyph's bounding box shares a *positive area* with the union, but is not fully inside it. (Merely touching an edge, with zero shared area, does **not** count.)
+
+Either state removes the glyph from exported text: if any part of a glyph is hidden, none of its text is emitted. Consecutive removed glyphs are collapsed into a single placeholder placed at the run's original bounds, so the surrounding text keeps its boundaries.
+
+| Method | Description |
+|--------|-------------|
+|`.extract_text_redacted(redactions, placeholder="[REDACTED]", include_partial=True, **kwargs)`| Like `.extract_text(...)`, but with occluded glyphs withheld and replaced by `placeholder`. Remaining `**kwargs` behave as in `.extract_text(...)`. Setting `include_partial=False` withholds only fully occluded glyphs.|
+|`.redacted_chars(redactions, placeholder="[REDACTED]", include_partial=True)`| Returns char objects with occluded glyphs replaced by placeholders (one per consecutive run). The originals are never returned.|
+|`.extract_tables_redacted(redactions, table_settings={}, placeholder="[REDACTED]", include_partial=True)`| Like `.extract_tables(...)`, but with occluded glyphs withheld. The grid is preserved exactly (same tables, rows, and columns). A cell that contained occluded glyphs is returned as a `pdfplumber.redaction.RedactedCell` — a `str` subclass whose `.redaction` attribute holds the cell's position and occlusion counts. Such a cell is never a plain `""`, so it cannot be mistaken for a cell that was empty in the source document.|
+|`.extract_table_redacted(...)`| Same as above, but returns only the largest table (see `.find_table(...)`).|
+|`.redaction_report(redactions, table_settings={}, ...)`| Returns a `PageRedactionReport` describing what the redactions cover: the page number, the merged redaction positions, glyph counts by occlusion state, and the positions/counts of any table cells containing occluded glyphs. It never contains source text.|
+|`.extract_redacted(redactions, table_settings={}, placeholder="[REDACTED]", include_partial=True, **text_kwargs)`| One-pass convenience method returning a `RedactedExtraction` with `.text`, `.tables`, and `.report`.|
+
+For example:
+
+```python
+page = pdf.pages[0]
+redactions = [(70, 30, 165, 115), (150, 30, 260, 115)]  # may overlap
+page.extract_text_redacted(redactions)
+page.extract_tables_redacted(redactions)     # cells marked where redacted
+page.redaction_report(redactions).to_dict()  # positions + counts only
+```
+
+`PDF.redaction_report({page_number: redactions, ...})` assembles a multi-page report. Lower-level helpers live in `pdfplumber.redaction` (`Redactor`, `RedactedCell`, `OcclusionCounts`, etc.) and `pdfplumber.utils` (`rects_to_union`, `union_area`, `get_union_intersection_area`).
+
 ## Extracting tables
 
 `pdfplumber`'s approach to table detection borrows heavily from [Anssi Nurminen's master's thesis](https://trepo.tuni.fi/bitstream/handle/123456789/21520/Nurminen.pdf?sequence=3), and is inspired by [Tabula](https://github.com/tabulapdf/tabula-extractor/issues/16). It works like this:
